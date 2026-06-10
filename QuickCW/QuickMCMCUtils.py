@@ -324,9 +324,7 @@ def initialize_sample_helper(chain_params,n_par_tot,Npsr,max_toa,par_names,par_n
                         print("No value found in noisedict for: " + par)
                         print("Setting it to a low value of -19 to help convergence of insignificant RN")
                         samples[j,0,par_names.index(par)] = -19.0
-                    else: #free spectral log10_rho
-                        print("No value found in noisedict for: " + par)
-                        print("Setting it to a low value of -8 to help convergence of insignificant RN")
+                    else: #free spectral log10_rho - default to a low value to help convergence of insignificant RN
                         samples[j,0,par_names.index(par)] = -8.0
 
             gwb_noise_names = [par for par in par_names if par.startswith("gwb_")]
@@ -344,9 +342,7 @@ def initialize_sample_helper(chain_params,n_par_tot,Npsr,max_toa,par_names,par_n
                     print("No value found in noisedict for: gwb_log10_A")
                     print("Setting it to a low value of -19 to help convergence of insignificant RN")
                     samples[j,0,par_names.index(par)] = -19.0
-                else: #free spectral log10_rho
-                    print("No value found in noisedict for: " + par)
-                    print("Setting it to a low value of -8 to help convergence of insignificant GWB")
+                else: #free spectral log10_rho - default to a low value to help convergence of insignificant GWB
                     samples[j,0,par_names.index(par)] = -8.0
 
             samples[j,0,:] = correct_intrinsic(samples[j,0,:],x0_swap,chain_params.freq_bounds,FPI.cut_par_ids, FPI.cut_lows, FPI.cut_highs)
