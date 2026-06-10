@@ -200,6 +200,10 @@ def add_rn_eig_starting_point(samples,par_names,x0_swap,flm,FLI_swap,chain_param
 
     :return samples:        Perturbed samples
     """
+    if not x0_swap.rn_pl_mode:
+        #no red noise eigenvector machinery in free spectral mode; starting points are left as is
+        return samples
+
     eig_rn0,_,_ = get_fishers(samples[0:1],par_names,x0_swap,flm, FLI_swap,\
                               get_diag=False,get_rn_block=True,get_common=False,get_intrinsic_diag=False)
     scaling = 0.*2.38/np.sqrt(2*Npsr/2)
@@ -233,14 +237,19 @@ def initialize_de_buffer(sample0,n_par_tot,par_names,chain_params,x0_swap,FPI,ei
     rn_base = sample0[idx_rn]
 
     for j in range(chain_params.n_chain):
-        scale_eig0 = scaling*np.sqrt(chain_params.Ts[j])*eig_rn[j,:,0,:]
-        scale_eig1 = scaling*np.sqrt(chain_params.Ts[j])*eig_rn[j,:,1,:]
+        if x0_swap.rn_pl_mode:
+            scale_eig0 = scaling*np.sqrt(chain_params.Ts[j])*eig_rn[j,:,0,:]
+            scale_eig1 = scaling*np.sqrt(chain_params.Ts[j])*eig_rn[j,:,1,:]
 
         for i in range(chain_params.de_history_size):
             new_point = CWFastPrior.get_sample_full(len(par_names),FPI)
 
             #reset the red noise parameters to be a fisher matrix jump off of the starting values
-            new_point = add_rn_eig_jump(scale_eig0,scale_eig1,new_point,rn_base,idx_rn,x0_swap.Npsr)
+            if x0_swap.rn_pl_mode:
+                new_point = add_rn_eig_jump(scale_eig0,scale_eig1,new_point,rn_base,idx_rn,x0_swap.Npsr)
+            else:
+                #free spectral mode: small gaussian perturbation off of the starting values
+                new_point[idx_rn] = rn_base + 0.1*np.sqrt(chain_params.Ts[j])*np.random.normal(0.,1.,idx_rn.size)
 
             #do corrections just in case
             x0_swap.update_params(new_point)
@@ -293,52 +302,52 @@ def initialize_sample_helper(chain_params,n_par_tot,Npsr,max_toa,par_names,par_n
                 x0_swap.update_params(samples[j,0,:])
 
             for psr in pta.pulsars:
-                if chain_params.zero_rn:
-                    print("zero_rn=True --> Setting " + psr + "_red_noise_gamma=0.0")
-                    samples[j,0,par_names.index(psr + "_red_noise_gamma")] = 0.0
-                elif rn_emp_dist is not None:
-                    psr_idx = pta.pulsars.index(psr)
-                    samples[j,0,par_names.index(psr + "_red_noise_gamma")] = rn_emp_dist[psr_idx].draw()[1]
-                    #print(samples[j,0,par_names.index(psr + "_red_noise_gamma")])
-                elif (psr + "_red_noise_gamma") in noisedict.keys():
-                    samples[j,0,par_names.index(psr + "_red_noise_gamma")] = noisedict[psr + "_red_noise_gamma"]
-                else:
-                    print("No value found in noisedict for: " + psr + "_red_noise_gamma")
+                psr_noise_names = [par for par in par_names if par.startswith(psr + "_red_noise_")]
+                for par in psr_noise_names:
+                    if chain_params.zero_rn:
+                        zero_val = noise_zero_value(par)
+                        print("zero_rn=True --> Setting " + par + "=" + str(zero_val))
+                        samples[j,0,par_names.index(par)] = zero_val
+                    elif rn_emp_dist is not None and ("_red_noise_gamma" in par or "_red_noise_log10_A" in par):
+                        psr_idx = pta.pulsars.index(psr)
+                        if "_red_noise_gamma" in par:
+                            samples[j,0,par_names.index(par)] = rn_emp_dist[psr_idx].draw()[1]
+                        else:
+                            samples[j,0,par_names.index(par)] = rn_emp_dist[psr_idx].draw()[0]
+                    elif par in noisedict.keys():
+                        samples[j,0,par_names.index(par)] = noisedict[par]
+                    elif "_red_noise_gamma" in par:
+                        print("No value found in noisedict for: " + par)
+                        print("Using a random draw from the prior as a first sample instead")
+                        print(samples[j,0,par_names.index(par)])
+                    elif "_red_noise_log10_A" in par:
+                        print("No value found in noisedict for: " + par)
+                        print("Setting it to a low value of -19 to help convergence of insignificant RN")
+                        samples[j,0,par_names.index(par)] = -19.0
+                    else: #free spectral log10_rho
+                        print("No value found in noisedict for: " + par)
+                        print("Setting it to a low value of -8 to help convergence of insignificant RN")
+                        samples[j,0,par_names.index(par)] = -8.0
+
+            gwb_noise_names = [par for par in par_names if par.startswith("gwb_")]
+            for par in gwb_noise_names:
+                if chain_params.zero_gwb:
+                    zero_val = noise_zero_value(par)
+                    print("zero_gwb=True --> Setting " + par + "=" + str(zero_val))
+                    samples[j,0,par_names.index(par)] = zero_val
+                elif par in noisedict.keys():
+                    samples[j,0,par_names.index(par)] = noisedict[par]
+                elif par == "gwb_gamma":
+                    print("No value found in noisedict for: gwb_gamma")
                     print("Using a random draw from the prior as a first sample instead")
-                    print(samples[j,0,par_names.index(psr + "_red_noise_gamma")])
-
-                if chain_params.zero_rn:
-                    print("zero_rn=True --> Setting " + psr + "_red_noise_log10_A=-20.0")
-                    samples[j,0,par_names.index(psr + "_red_noise_log10_A")] = -20.0
-                elif rn_emp_dist is not None:
-                    psr_idx = pta.pulsars.index(psr)
-                    samples[j,0,par_names.index(psr + "_red_noise_log10_A")] = rn_emp_dist[psr_idx].draw()[0]
-                    #print(samples[j,0,par_names.index(psr + "_red_noise_log10_A")])
-                elif (psr + "_red_noise_log10_A") in noisedict.keys():
-                    samples[j,0,par_names.index(psr + "_red_noise_log10_A")] = noisedict[psr + "_red_noise_log10_A"]
-                else:
-                    print("No value found in noisedict for: " + psr + "_red_noise_log10_A")
+                elif par == "gwb_log10_A":
+                    print("No value found in noisedict for: gwb_log10_A")
                     print("Setting it to a low value of -19 to help convergence of insignificant RN")
-                    samples[j,0,par_names.index(psr + "_red_noise_log10_A")] = -19.0
-
-            if chain_params.zero_gwb:
-                print("zero_gwb=True --> Setting gwb_gamma=0.0")
-                samples[j,0,par_names.index("gwb_gamma")] = 0.0
-            elif "gwb_gamma" in noisedict.keys():
-                samples[j,0,par_names.index("gwb_gamma")] = noisedict["gwb_gamma"]
-            else:
-                print("No value found in noisedict for: gwb_gamma")
-                print("Using a random draw from the prior as a first sample instead")
-
-            if chain_params.zero_gwb:
-                print("zero_gwb=True --> Setting gwb_log10_A=-20.0")
-                samples[j,0,par_names.index("gwb_log10_A")] = -20.0
-            elif "gwb_log10_A" in noisedict.keys():
-                samples[j,0,par_names.index("gwb_log10_A")] = noisedict["gwb_log10_A"]
-            else:
-                print("No value found in noisedict for: gwb_log10_A")
-                print("Setting it to a low value of -19 to help convergence of insignificant RN")
-                samples[j,0,par_names.index("gwb_log10_A")] = -19.0
+                    samples[j,0,par_names.index(par)] = -19.0
+                else: #free spectral log10_rho
+                    print("No value found in noisedict for: " + par)
+                    print("Setting it to a low value of -8 to help convergence of insignificant GWB")
+                    samples[j,0,par_names.index(par)] = -8.0
 
             samples[j,0,:] = correct_intrinsic(samples[j,0,:],x0_swap,chain_params.freq_bounds,FPI.cut_par_ids, FPI.cut_lows, FPI.cut_highs)
             samples[j,0,:] = correct_extrinsic(samples[j,0,:],x0_swap)
@@ -347,6 +356,20 @@ def initialize_sample_helper(chain_params,n_par_tot,Npsr,max_toa,par_names,par_n
             itr_accept += 1
 
     return samples
+
+def noise_zero_value(par_name):
+    """value to fix a noise parameter to when it is being zeroed out (zero_rn/zero_gwb)
+
+    :param par_name:    Name of the noise parameter
+
+    :return:            Value effectively turning off the noise component
+    """
+    if "gamma" in par_name:
+        return 0.0
+    elif "log10_rho" in par_name:
+        return -9.0
+    else: #log10_A
+        return -20.0
 
 def get_param_names(pta):
     """get the name Lists for various parameters
@@ -365,15 +388,14 @@ def get_param_names(pta):
     par_names_cw_ext = List(['0_cos_inc', '0_log10_h', '0_phase0', '0_psi'])
     par_names_cw_int = List(['0_cos_gwtheta', '0_gwphi', '0_log10_fgw', '0_log10_mc'])
 
-    par_names_noise = ['gwb_gamma', 'gwb_log10_A']
+    par_names_noise = [par for par in par_names if par.startswith("gwb_")]
 
     for i,psr in enumerate(pta.pulsars):
         par_names_cw.append(psr + "_cw0_p_dist")
         par_names_cw.append(psr + "_cw0_p_phase")
         par_names_cw_ext.append(psr + "_cw0_p_phase")
         par_names_cw_int.append(psr + "_cw0_p_dist")
-        par_names_noise.append(psr + "_red_noise_gamma")
-        par_names_noise.append(psr + "_red_noise_log10_A")
+        par_names_noise.extend([par for par in par_names if par.startswith(psr + "_red_noise_")])
 
     return par_names,par_names_cw,par_names_cw_int,par_names_cw_ext,par_names_noise
 
@@ -393,6 +415,7 @@ class ChainParams():
     :param verbosity:               Parameter indicating how much info to print (higher value means more prints) [1]
     :param freq_bounds:             Lower and upper prior bounds on the GW frequency of the CW; np.nan lower bound is automatically turned into one over the observation time [[np.nan, 1.e-07]] 
     :param gwb_comps:               Number of frequency components to model in the GWB [14]
+    :param rn_comps:                Number of frequency components to model in the per-pulsar red noise [30]
     :param cos_gwtheta_bounds:      Prior bounds on the cosine of the GW theta sky location parameter (useful e.g. for targeted searches) [[-1,1]]
     :param gwphi_bounds:            Prior bounds on the the GW phi sky location parameter (useful e.g. for targeted searches) [[0,2*np.pi]]
     :param de_history_size:         Size of the differential evolution buffer
@@ -422,7 +445,7 @@ class ChainParams():
                  n_update_fisher: int = 100_000, save_every_n: int = 10_000,
                  fisher_eig_downsample: int = 10, T_ladder: list = None,
                  includeCW: bool = True, prior_recovery: bool = False, verbosity: int = 1,
-                 freq_bounds: np.ndarray = np.array([np.nan, 1e-7], dtype=np.float64), gwb_comps: int = 14,
+                 freq_bounds: np.ndarray = np.array([np.nan, 1e-7], dtype=np.float64), gwb_comps: int = 14, rn_comps: int = 30,
                  cos_gwtheta_bounds: np.ndarray = np.array([-1,1]), gwphi_bounds: np.ndarray = np.array([0,2*np.pi]),
                  de_history_size: int = 5_000, thin_de: int = 10_000,
                  log_fishers: bool = False, log_mean_likelihoods: bool = True,
@@ -452,6 +475,7 @@ class ChainParams():
         self.verbosity = verbosity
         self.freq_bounds = freq_bounds
         self.gwb_comps = gwb_comps
+        self.rn_comps = rn_comps
         self.cos_gwtheta_bounds=cos_gwtheta_bounds
         self.gwphi_bounds=gwphi_bounds
         self.de_history_size = de_history_size
@@ -617,9 +641,12 @@ class MCMCChain():
         #TODO why was this distance zeroing here? Shouldn't change from initialized state
         #self.samples[:,0,self.x0_swap.idx_dists] = 0.
 
-        self.flm = CWFastLikelihoodNumba.FastLikeMaster(self.psrs,self.pta,dict(zip(self.par_names, self.samples[0, 0, :])),self.x0_swap,
+        if self.rn_emp_dist is not None and not self.x0_swap.rn_pl_mode:
+            raise NotImplementedError("RN empirical distributions are only supported with the powerlaw per-pulsar noise model")
+
+        self.flm = CWFastLikelihoodNumba.FastLikeMaster(self.psrs,self.pta,self.pta.map_params(self.samples[0, 0, :]),self.x0_swap,
                                                         includeCW=self.includeCW,prior_recovery=self.prior_recovery)
-        self.FLI_swap = self.flm.get_new_FastLike(self.x0_swap, dict(zip(self.par_names, self.samples[0, 0, :])))
+        self.FLI_swap = self.flm.get_new_FastLike(self.x0_swap, self.pta.map_params(self.samples[0, 0, :]))
 
         #add a random fisher eigenvalue jump to the starting point for the j>0 chains to get more diversity in the initial fisher matrices
         self.samples = add_rn_eig_starting_point(self.samples,self.par_names,self.x0_swap,self.flm,self.FLI_swap,self.chain_params,self.Npsr,self.FPI)
@@ -628,7 +655,7 @@ class MCMCChain():
         self.FLIs  = List([])
         for j in range(self.n_chain):
             self.x0s.append( CWFastLikelihoodNumba.CWInfo(self.Npsr,self.samples[j,0],self.par_names,self.par_names_cw_ext,self.par_names_cw_int))
-            self.FLIs.append(self.flm.get_new_FastLike(self.x0s[j], dict(zip(self.par_names, self.samples[j, 0, :]))))
+            self.FLIs.append(self.flm.get_new_FastLike(self.x0s[j], self.pta.map_params(self.samples[j, 0, :])))
 
         #make extra x0s to help parallelizing MTMCMC updates
         self.x0_extras = List([])
@@ -858,7 +885,7 @@ class MCMCChain():
             assert self.FLIs[j3].get_lnlikelihood(self.x0s[j3]) == self.log_likelihood[j3,itrb]
             if full_validate:
                 self.x0_swap.update_params(self.samples[j3,itrb])
-                self.flm.recompute_FastLike(self.FLI_swap,self.x0_swap,dict(zip(self.par_names, self.samples[j3,itrb])))
+                self.flm.recompute_FastLike(self.FLI_swap,self.x0_swap,self.pta.map_params(self.samples[j3,itrb]))
                 self.FLI_swap.validate_consistent(self.x0s[j3])
                 self.FLI_swap.validate_consistent(self.x0_swap)
                 self.x0_swap.validate_consistent(self.samples[j3,itrb])

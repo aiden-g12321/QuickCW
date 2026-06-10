@@ -7,6 +7,26 @@ tref = 53000*86400
 #fisher size parameters
 eps = {'0_cos_gwtheta':1.e-4,'0_cos_inc':1.e-4,'0_gwphi':1.e-4,'0_log10_fgw':1.e-5,'0_log10_h':1.e-5,'0_log10_mc':1.e-4,'0_phase0':1.e-4,'0_psi':1.e-4,'cw0_p_phase':1.e-3,'cw0_p_dist':1.e-3,'red_noise_gamma':1.e-4,'red_noise_log10_A':1.e-4,'gwb_gamma':1.e-2,'gwb_log10_A':1.e-2}
 #eps = {'0_cos_gwtheta':1.e-4,'0_cos_inc':1.e-4,'0_gwphi':1.e-4,'0_log10_fgw':1.e-5,'0_log10_h':1.e-5,'0_log10_mc':1.e-4,'0_phase0':1.e-4,'0_psi':1.e-4,'cw0_p_phase':1.e-3,'cw0_p_dist':1.e-3,'red_noise_gamma':1.e-3,'red_noise_log10_A':1.e-3}
+#fisher step sizes for free spectral noise parameters
+eps['red_noise_log10_rho'] = 1.e-3
+eps['gwb_log10_rho'] = 1.e-2
+
+def eps_lookup(par_name):
+    """look up the fisher perturbation size for a parameter, handling free spectral parameter names
+
+    :param par_name:    Name of the parameter
+
+    :return:            Fisher perturbation size
+    """
+    if par_name in eps:
+        return eps[par_name]
+    elif "gwb_log10_rho" in par_name:
+        return eps['gwb_log10_rho']
+    elif "_red_noise_log10_rho" in par_name:
+        return eps['red_noise_log10_rho']
+    else:
+        raise KeyError("no fisher perturbation size known for parameter "+par_name)
+
 use_default_cw0_p_sigma = False
 sigma_cw0_p_phase_default = 2.
 sigma_cw0_p_dist_default = 2. #default is big here because informative priors will dominate anyway if constraints are poor

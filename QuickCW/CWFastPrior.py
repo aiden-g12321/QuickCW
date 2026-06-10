@@ -58,10 +58,18 @@ class FastPrior:
 
         for par in self.pta.params:
             #print(par)
+            #vector parameters (e.g. free spectral log10_rho) show up flattened with _0.._n-1 suffixes in pta.param_names
+            if par.size is not None and par.size > 1:
+                flat_names = [par.name + "_" + str(ii) for ii in range(par.size)]
+            else:
+                flat_names = [par.name]
             if "Uniform" in par._typename:
-                uniform_pars.append(par.name)
-                uf_lows.append(float(par._typename.split('=')[1].split(',')[0]))
-                uf_highs.append(float(par._typename.split('=')[2][:-1]))
+                low = float(par._typename.split('=')[1].split(',')[0])
+                high = float(par._typename.split('=')[2][:-1])
+                for flat_name in flat_names:
+                    uniform_pars.append(flat_name)
+                    uf_lows.append(low)
+                    uf_highs.append(high)
             elif "LinearExp" in par._typename:
                 lin_exp_pars.append(par.name)
                 le_lows.append(float(par._typename.split('=')[1].split(',')[0]))

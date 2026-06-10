@@ -5,6 +5,28 @@ import numpy as np
 
 import QuickCW.const_mcmc as cm
 
+def get_epsilon_rn(params, x0_swap):
+    """get the fisher perturbation sizes for the per-pulsar red noise parameters as an (Npsr, n_rn_per_psr) array
+
+    :param params:      Array of parameter values
+    :param x0_swap:     CWInfo object
+
+    :return epsilon_rn: (Npsr, n_rn_per_psr) array of perturbation sizes
+    """
+    Npsr = x0_swap.Npsr
+    epsilon_rn = np.zeros((Npsr,x0_swap.n_rn_per_psr))
+    if x0_swap.rn_pl_mode:
+        epsilon_rn[:,0] = 2*cm.eps['red_noise_gamma']
+        epsilon_rn[:,1] = 2*cm.eps['red_noise_log10_A']
+
+        #adapt epsilon to be a bit bigger at low amplitude values
+        small = params[x0_swap.idx_rn_psr[:,1]]<cm.eps_log10_A_small_cut
+        epsilon_rn[small,0] *= cm.eps_rn_diag_gamma_small_mult
+        epsilon_rn[small,1] *= cm.eps_rn_diag_log10_A_small_mult
+    else:
+        epsilon_rn[:,:] = 2*cm.eps['red_noise_log10_rho']
+    return epsilon_rn
+
 def get_FLI_mem(FLI_swap):
     """store everything needed to reset FLI for non-red noise updates
 
@@ -54,7 +76,7 @@ def params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,idxs_targ,epsilo
         pass
     else:
         try:
-            flm.recompute_FastLike(FLI_swap,x0_swap,dict(zip(par_names, paramsPP)),mask=mask)
+            flm.recompute_FastLike(FLI_swap,x0_swap,flm.pta.map_params(paramsPP),mask=mask)
         except np.linalg.LinAlgError:
             print("failed to perturb parameters for fisher")
             print("params: ",paramsPP)
@@ -189,17 +211,12 @@ def get_fishers(samples, par_names, x0_swap, flm, FLI_swap,get_diag=True,get_com
             FLI_swap.validate_consistent(x0_swap)
             if start_safe:
                 assert np.all(logdet_array_in==FLI_swap.logdet_array)
-        elif get_rn_block:
+        elif get_rn_block and x0_swap.rn_pl_mode:
             #fisher_diag = np.zeros(len(par_names))
-            epsilon_gammas = np.zeros(x0_swap.idx_rn_gammas.size)+2*cm.eps['red_noise_gamma']
-            epsilon_log10_As = np.zeros(x0_swap.idx_rn_log10_As.size)+2*cm.eps['red_noise_log10_A']
-
-            #adapt epsilon to be a bit bigger at low amplitude values
-            epsilon_gammas[params[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_diag_gamma_small_mult
-            epsilon_log10_As[params[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_diag_log10_A_small_mult
+            epsilon_rn = get_epsilon_rn(params,x0_swap)
 
             #don't need gwb because it doesn't affect the eigenvectors
-            pp1s,mm1s,nn1s,helper_tuple0,_,_,_ = fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilon_gammas,epsilon_log10_As,Npsr,get_intrinsic_diag=True,start_safe=start_safe,get_gwb=False)
+            pp1s,mm1s,nn1s,helper_tuple0,_,_,_ = fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilon_rn,Npsr,get_intrinsic_diag=True,start_safe=start_safe,get_gwb=False)
             FLI_swap.validate_consistent(x0_swap)
             if start_safe:
                 assert np.all(logdet_array_in==FLI_swap.logdet_array)
@@ -208,15 +225,20 @@ def get_fishers(samples, par_names, x0_swap, flm, FLI_swap,get_diag=True,get_com
             mms = np.zeros(len(par_names))
             nns = np.zeros(len(par_names))
             epsilons = np.zeros(len(par_names))
-            epsilons[x0_swap.idx_rn_gammas] = epsilon_gammas
-            epsilons[x0_swap.idx_rn_log10_As] = epsilon_log10_As
+            for itrc2 in range(x0_swap.n_rn_per_psr):
+                epsilons[x0_swap.idx_rn_psr[:,itrc2]] = epsilon_rn[:,itrc2]
             diagonal_data_loc = (pp1s,mm1s,nn1s,epsilons,helper_tuple0,pps,mms,nns)
 
         if get_rn_block:
-            eig_rn[itrc] = get_fisher_rn_block_eigenvectors(params, par_names, x0_swap, flm, FLI_swap,diagonal_data_loc)
-            FLI_swap.validate_consistent(x0_swap)
-            if start_safe:
-                assert np.all(logdet_array_in==FLI_swap.logdet_array)
+            if x0_swap.rn_pl_mode:
+                eig_rn[itrc] = get_fisher_rn_block_eigenvectors(params, par_names, x0_swap, flm, FLI_swap,diagonal_data_loc)
+                FLI_swap.validate_consistent(x0_swap)
+                if start_safe:
+                    assert np.all(logdet_array_in==FLI_swap.logdet_array)
+            else:
+                #no 2x2 eigenvector structure in free spectral mode; use defaults (diagonal fishers are used for jumps instead)
+                eig_rn[itrc,:,0,0] = 0.5
+                eig_rn[itrc,:,1,1] = 0.5
 
             continue
 
@@ -285,8 +307,8 @@ def get_fisher_rn_block_eigenvectors(params, par_names, x0_swap, flm, FLI_swap,d
         chol_Sigmas_save.append(FLI_swap.chol_Sigmas[ii].copy())
 
     epsilon_diags = np.zeros((Npsr,2))
-    epsilon_diags[:,0] = epsilons[x0_swap.idx_rn_gammas]
-    epsilon_diags[:,1] = epsilons[x0_swap.idx_rn_log10_As]
+    epsilon_diags[:,0] = epsilons[x0_swap.idx_rn_psr[:,0]]
+    epsilon_diags[:,1] = epsilons[x0_swap.idx_rn_psr[:,1]]
 
 
     for itrs in range(Npsr):
@@ -328,18 +350,19 @@ def get_fisher_rn_block_eigenvectors(params, par_names, x0_swap, flm, FLI_swap,d
     #the noise parameters are very expensive to calculate individually so calculate them all en masse
     #get the off diagonal elements of the fisher matrix
 
-    idx_rns = np.hstack([x0_swap.idx_rn_gammas,x0_swap.idx_rn_log10_As])
+    idx_rns = x0_swap.idx_rn #ordered [all gammas, all log10_As] in powerlaw mode
     epsilon_offdiag = cm.eps_rn_offdiag
     epsilon_drns = np.zeros(idx_rns.size)+epsilon_offdiag
     epsilon_crns = np.zeros(idx_rns.size)-epsilon_offdiag #make idx_rn_log10_As negative and idx_rn_gammax positive
-    epsilon_crns[:x0_swap.idx_rn_gammas.size] = epsilon_offdiag
+    epsilon_crns[:Npsr] = epsilon_offdiag
 
     #adapt epsilon to be a bit bigger at low amplitude values
-    epsilon_drns[0:x0_swap.idx_rn_gammas.size][params[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_offdiag_small_mult
-    epsilon_drns[x0_swap.idx_rn_gammas.size:][params[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_offdiag_small_mult
+    small = params[x0_swap.idx_rn_psr[:,1]]<cm.eps_log10_A_small_cut
+    epsilon_drns[0:Npsr][small] *= cm.eps_rn_offdiag_small_mult
+    epsilon_drns[Npsr:][small] *= cm.eps_rn_offdiag_small_mult
 
-    epsilon_crns[0:x0_swap.idx_rn_gammas.size][params[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_offdiag_small_mult
-    epsilon_crns[x0_swap.idx_rn_gammas.size:][params[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_offdiag_small_mult
+    epsilon_crns[0:Npsr][small] *= cm.eps_rn_offdiag_small_mult
+    epsilon_crns[Npsr:][small] *= cm.eps_rn_offdiag_small_mult
 
     helper_tuple_drns_PP = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,idx_rns,epsilon_drns,mask=~defaulted)
     helper_tuple_drns_MM = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,idx_rns,-epsilon_drns,mask=~defaulted)
@@ -407,7 +430,7 @@ def get_fisher_rn_block_eigenvectors(params, par_names, x0_swap, flm, FLI_swap,d
     return eig_rn
 
 
-def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilon_gammas,epsilon_log10_As,Npsr,get_intrinsic_diag=True,start_safe=False,get_gwb=True):
+def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilon_rn,Npsr,get_intrinsic_diag=True,start_safe=False,get_gwb=True):
     """helper to get the mm and pp values needed to calculate the diagonal fisher eigenvectors for the red noise parameters
 
     :param params:              --
@@ -415,8 +438,7 @@ def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilo
     :param FLI_swap:            FastLikeInfo object
     :param flm:                 FastLikeMaster object
     :param par_names:           List of parameter names
-    :param epsilon_gammas:      Perturbation values for gamma parameters
-    :param epsilon_log10_As:    Perturbation values for log10 amplitudes
+    :param epsilon_rn:          (Npsr, n_rn_per_psr) array of perturbation values for the per-pulsar noise parameters
     :param Npsr:                Number of pulsars
     :param get_intrinsic_diag:  --
     :param start_safe:          --
@@ -432,9 +454,10 @@ def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilo
     """
     if get_intrinsic_diag:
         print("Calculating RN fisher Eigenvectors")
+    n_rn = x0_swap.n_rn_per_psr
     #future locations
-    pp1s = np.zeros((Npsr,2))
-    mm1s = np.zeros((Npsr,2))
+    pp1s = np.zeros((Npsr,n_rn))
+    mm1s = np.zeros((Npsr,n_rn))
 
     nns_gwb = np.zeros(x0_swap.idx_gwb.size)
     pps_gwb = np.zeros(x0_swap.idx_gwb.size)
@@ -444,7 +467,7 @@ def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilo
 
     #put the reset here to avoid having to do it both before and after
     if not start_safe:
-        flm.recompute_FastLike(FLI_swap,x0_swap,dict(zip(par_names, params)))
+        flm.recompute_FastLike(FLI_swap,x0_swap,flm.pta.map_params(params))
 
     FLI_mem0 = get_FLI_mem(FLI_swap)
 
@@ -458,19 +481,14 @@ def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilo
             chol_Sigmas_save.append(FLI_swap.chol_Sigmas[ii].copy())
 
         #the noise parameters are very expensive to calculate individually so calculate them all en masse
-        helper_tuple_gammas_PP = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,x0_swap.idx_rn_gammas,epsilon_gammas)
-        helper_tuple_gammas_MM = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,x0_swap.idx_rn_gammas,-epsilon_gammas)
+        #perturbing one noise parameter per pulsar at a time is valid because each pulsar's noise parameters only affect its own block
+        for itrc in range(n_rn):
+            idx_col = np.ascontiguousarray(x0_swap.idx_rn_psr[:,itrc])
+            helper_tuple_col_PP = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,idx_col,epsilon_rn[:,itrc])
+            helper_tuple_col_MM = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,idx_col,-epsilon_rn[:,itrc])
 
-        helper_tuple_log10_As_PP = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,x0_swap.idx_rn_log10_As,epsilon_log10_As)
-        helper_tuple_log10_As_MM = params_perturb_helper(params,x0_swap,FLI_swap,flm,par_names,x0_swap.idx_rn_log10_As,-epsilon_log10_As)
-
-        #epsilon = cm.eps['red_noise_gamma']
-        pp1s[:,0] = fisher_synthetic_FLI_helper(helper_tuple_gammas_PP,x0_swap,FLI_swap,params)
-        mm1s[:,0] = fisher_synthetic_FLI_helper(helper_tuple_gammas_MM,x0_swap,FLI_swap,params)
-
-        #epsilon = cm.eps['red_noise_log10_A']
-        pp1s[:,1] = fisher_synthetic_FLI_helper(helper_tuple_log10_As_PP,x0_swap,FLI_swap,params)
-        mm1s[:,1] = fisher_synthetic_FLI_helper(helper_tuple_log10_As_MM,x0_swap,FLI_swap,params)
+            pp1s[:,itrc] = fisher_synthetic_FLI_helper(helper_tuple_col_PP,x0_swap,FLI_swap,params)
+            mm1s[:,itrc] = fisher_synthetic_FLI_helper(helper_tuple_col_MM,x0_swap,FLI_swap,params)
 
         if get_gwb:
             #double check everything is reset although it shouldn't actually be necessary here
@@ -485,7 +503,7 @@ def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilo
             #do the gwb parameters
             for itr,i in enumerate(x0_swap.idx_gwb):
                 #gwb jump so update everything
-                epsilon = cm.eps[par_names[i]]
+                epsilon = cm.eps_lookup(par_names[i])
 
                 paramsPP = np.copy(params)
                 paramsMM = np.copy(params)
@@ -497,12 +515,12 @@ def fisher_rn_mm_pp_diagonal_helper(params,x0_swap,FLI_swap,flm,par_names,epsilo
                 #must be one of the intrinsic parameters
                 x0_swap.update_params(paramsPP)
 
-                flm.recompute_FastLike(FLI_swap,x0_swap,dict(zip(par_names, paramsPP)),mask=None)
+                flm.recompute_FastLike(FLI_swap,x0_swap,flm.pta.map_params(paramsPP),mask=None)
                 pps_gwb[itr] = FLI_swap.get_lnlikelihood(x0_swap)#FLI_swap.resres,FLI_swap.logdet,FLI_swap.pos,FLI_swap.pdist,FLI_swap.NN,FLI_swap.MMs)
 
                 x0_swap.update_params(paramsMM)
 
-                flm.recompute_FastLike(FLI_swap,x0_swap,dict(zip(par_names, paramsMM)),mask=None)
+                flm.recompute_FastLike(FLI_swap,x0_swap,flm.pta.map_params(paramsMM),mask=None)
                 mms_gwb[itr] = FLI_swap.get_lnlikelihood(x0_swap)#,FLI_swap.resres,FLI_swap.logdet,FLI_swap.pos,FLI_swap.pdist,FLI_swap.NN,FLI_swap.MMs)
 
                 safe_reset_swap(FLI_swap,x0_swap,params,FLI_mem0)
@@ -535,10 +553,8 @@ def safe_reset_swap(FLI_swap,x0_swap,params_old,FLI_mem0):
     FLI_swap.gwphi = x0_swap.gwphi
     FLI_swap.log10_fgw = x0_swap.log10_fgw
     FLI_swap.log10_mc = x0_swap.log10_mc
-    FLI_swap.gwb_gamma = x0_swap.gwb_gamma
-    FLI_swap.gwb_log10_A = x0_swap.gwb_log10_A
-    FLI_swap.rn_gammas = x0_swap.rn_gammas.copy()
-    FLI_swap.rn_log10_As = x0_swap.rn_log10_As.copy()
+    FLI_swap.gwb_vals = x0_swap.gwb_vals.copy()
+    FLI_swap.rn_vals = x0_swap.rn_vals.copy()
     FLI_swap.cw_p_dists = x0_swap.cw_p_dists.copy()
 
     FLI_swap.MMs[:] = MMs0
@@ -593,41 +609,32 @@ def get_fisher_diagonal(samples_fisher, par_names, x0_swap, flm, FLI_swap,get_in
     epsilons = np.zeros(dim)
 
     sigma_defaults = np.full(dim,1.)
-    sigma_defaults[x0_swap.idx_rn_gammas] = cm.sigma_noise_default
-    sigma_defaults[x0_swap.idx_rn_log10_As] = cm.sigma_noise_default
+    sigma_defaults[x0_swap.idx_rn] = cm.sigma_noise_default
     sigma_defaults[x0_swap.idx_dists] = cm.sigma_cw0_p_dist_default
     sigma_defaults[x0_swap.idx_phases] = cm.sigma_cw0_p_phase_default
     sigma_defaults[x0_swap.idx_log10_fgw] = cm.sigma_log10_fgw_default
     sigma_defaults[x0_swap.idx_log10_h] = cm.sigma_log10_h_default
     sigma_defaults[x0_swap.idx_gwb] = cm.sigma_gwb_default
 
-    epsilon_gammas = np.zeros(x0_swap.idx_rn_gammas.size)+2*cm.eps['red_noise_gamma']
-    epsilon_log10_As = np.zeros(x0_swap.idx_rn_log10_As.size)+2*cm.eps['red_noise_log10_A']
-
-    #adapt epsilon to be a bit bigger at low amplitude values
-    epsilon_gammas[samples_fisher[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_diag_gamma_small_mult
-    epsilon_log10_As[samples_fisher[x0_swap.idx_rn_log10_As]<cm.eps_log10_A_small_cut] *= cm.eps_rn_diag_log10_A_small_mult
+    epsilon_rn = get_epsilon_rn(samples_fisher,x0_swap)
     epsilon_dists = np.zeros(Npsr)+2*cm.eps['cw0_p_dist']
-    epsilons[x0_swap.idx_rn_gammas] = epsilon_gammas
-    epsilons[x0_swap.idx_rn_log10_As] = epsilon_log10_As
+    for itrc in range(x0_swap.n_rn_per_psr):
+        epsilons[x0_swap.idx_rn_psr[:,itrc]] = epsilon_rn[:,itrc]
     epsilons[x0_swap.idx_dists] = epsilon_dists
-    epsilons[x0_swap.idx_gwb_gamma] = 2*cm.eps['gwb_gamma']
-    epsilons[x0_swap.idx_gwb_log10_A] = 2*cm.eps['gwb_log10_A']
+    for i_gwb in x0_swap.idx_gwb:
+        epsilons[i_gwb] = 2*cm.eps_lookup(par_names[i_gwb])
 
     pp2s,mm2s,nn2s,helper_tuple0,pps_gwb,mms_gwb,nns_gwb = fisher_rn_mm_pp_diagonal_helper(samples_fisher,x0_swap,FLI_swap,flm,\
-                                                                   par_names,epsilon_gammas,epsilon_log10_As,Npsr,\
+                                                                   par_names,epsilon_rn,Npsr,\
                                                                    get_intrinsic_diag=get_intrinsic_diag,start_safe=start_safe,\
                                                                    get_gwb=(get_intrinsic_diag and not cm.use_default_gwb_sigma))
     (_,FLI_mem0) = helper_tuple0
 
     if get_intrinsic_diag:
-        pps[x0_swap.idx_rn_gammas] = pp2s[:,0]
-        mms[x0_swap.idx_rn_gammas] = mm2s[:,0]
-        nns[x0_swap.idx_rn_gammas] = nn2s
-
-        pps[x0_swap.idx_rn_log10_As] = pp2s[:,1]
-        mms[x0_swap.idx_rn_log10_As] = mm2s[:,1]
-        nns[x0_swap.idx_rn_log10_As] = nn2s
+        for itrc in range(x0_swap.n_rn_per_psr):
+            pps[x0_swap.idx_rn_psr[:,itrc]] = pp2s[:,itrc]
+            mms[x0_swap.idx_rn_psr[:,itrc]] = mm2s[:,itrc]
+            nns[x0_swap.idx_rn_psr[:,itrc]] = nn2s
 
         pps[x0_swap.idx_gwb] = pps_gwb[:]
         mms[x0_swap.idx_gwb] = mms_gwb[:]
@@ -700,7 +707,7 @@ def get_fisher_diagonal(samples_fisher, par_names, x0_swap, flm, FLI_swap,get_in
                 fisher_diag[i] = 1/cm.sigma_cw0_p_dist_default**2
             #should already have been done otherwise
 
-        elif (i in x0_swap.idx_rn_gammas) or (i in x0_swap.idx_rn_log10_As):
+        elif i in x0_swap.idx_rn:
             #continue
             if cm.use_default_noise_sigma or not get_intrinsic_diag:
                 fisher_diag[i] = 1./cm.sigma_noise_default**2

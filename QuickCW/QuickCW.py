@@ -29,6 +29,17 @@ from enterprise.signals import gp_signals
 
 from enterprise_extensions import deterministic
 
+@signal_base.function
+def free_spectrum(f, log10_rho=None):
+    """Free spectral model: PSD amplitude in each frequency bin is a free parameter
+
+    :param f:           Array of frequencies (each repeated twice for sine and cosine)
+    :param log10_rho:   Array of log10 of rho parameters (one per frequency bin)
+
+    :return:            Array of PSD values at each frequency
+    """
+    return np.repeat(10 ** (2 * np.asarray(log10_rho)), 2)
+
 import QuickCW.const_mcmc as cm
 from QuickCW.QuickMCMCUtils import MCMCChain, ChainParams
 
@@ -41,7 +52,8 @@ from QuickCW.PulsarDistPriors import DMDistParameter, PXDistParameter
 #
 ################################################################################
 #@profile
-def QuickCW(chain_params, psrs, noise_json=None, use_legacy_equad=False, include_ecorr=True, amplitude_prior='UL', gwb_gamma_prior=None, psr_distance_file=None, backend_selection=True):
+def QuickCW(chain_params, psrs, noise_json=None, use_legacy_equad=False, include_ecorr=True, amplitude_prior='UL', gwb_gamma_prior=None, psr_distance_file=None, backend_selection=True,
+            psr_noise_model='powerlaw', gwb_noise_model='powerlaw', log10_rho_prior=None, gwb_log10_rho_prior=None):
     """Set up all essential objects for QuickCW to do MCMC iterations
 
     :param chain_params:        ChainParams object
@@ -53,6 +65,10 @@ def QuickCW(chain_params, psrs, noise_json=None, use_legacy_equad=False, include
     :param gwb_gamma_prior:     Option to specify prior range on GWB spectral index gamma; None means we use the default np.array([0,7]) [None]
     :param psr_distance_file:   File containing parallax and DM distance information for pulsars; If None, we use Gaussian prior with pulsar distance and error from psr objects [None]
     :param backend_selection:   Option to use an enterprise Selection based on backend; Usually use True for real data False for simulated data [True]
+    :param psr_noise_model:     Per-pulsar red noise spectral model; 'powerlaw' for the usual power-law model or 'free_spectral' to make the PSD in each frequency bin a free parameter (log10_rho) ['powerlaw']
+    :param gwb_noise_model:     GWB spectral model; 'powerlaw' or 'free_spectral' (same convention as psr_noise_model) ['powerlaw']
+    :param log10_rho_prior:     Prior range on per-pulsar log10_rho parameters when psr_noise_model='free_spectral'; None means np.array([-9,-4]) [None]
+    :param gwb_log10_rho_prior: Prior range on GWB log10_rho parameters when gwb_noise_model='free_spectral'; None means np.array([-9,-4]) [None]
 
     :return pta:                enterprise PTA object
     :return mcc:                MCMCChain onject
@@ -88,22 +104,41 @@ def QuickCW(chain_params, psrs, noise_json=None, use_legacy_equad=False, include
         # give ecorr a name so that we can use the usual noisefiles created for Kernel ecorr
         ec = gp_signals.EcorrBasisModel(log10_ecorr=ecorr, selection=selection, name='')
 
-    log10_A = parameter.Uniform(-20, -11)
-    # log10_A = parameter.Uniform(-18, -11)
-    gamma = parameter.Uniform(0, 7)
+    # define red noise signal (powerlaw or free spectral PSD)
+    if psr_noise_model == 'powerlaw':
+        log10_A = parameter.Uniform(-20, -11)
+        # log10_A = parameter.Uniform(-18, -11)
+        gamma = parameter.Uniform(0, 7)
 
-    # define powerlaw PSD and red noise signal
-    pl = utils.powerlaw(log10_A=log10_A, gamma=gamma)
-    rn = gp_signals.FourierBasisGP(pl, components=30)
+        pl = utils.powerlaw(log10_A=log10_A, gamma=gamma)
+        rn = gp_signals.FourierBasisGP(pl, components=chain_params.rn_comps)
+    elif psr_noise_model == 'free_spectral':
+        if log10_rho_prior is None:
+            log10_rho_prior = np.array([-9, -4])
+        log10_rho = parameter.Uniform(log10_rho_prior[0], log10_rho_prior[1], size=chain_params.rn_comps)
+        fs = free_spectrum(log10_rho=log10_rho)
+        rn = gp_signals.FourierBasisGP(fs, components=chain_params.rn_comps)
+    else:
+        raise NotImplementedError("psr_noise_model must be either 'powerlaw' or 'free_spectral'")
 
-    log10_Agw = parameter.Uniform(-20,-11)('gwb_log10_A')
+    # define common red noise signal (powerlaw or free spectral PSD)
+    if gwb_noise_model == 'powerlaw':
+        log10_Agw = parameter.Uniform(-20,-11)('gwb_log10_A')
 
-    if gwb_gamma_prior is None:
-        gwb_gamma_prior = np.array([0,7])
+        if gwb_gamma_prior is None:
+            gwb_gamma_prior = np.array([0,7])
 
-    gamma_gw = parameter.Uniform(gwb_gamma_prior[0],gwb_gamma_prior[1])('gwb_gamma')
-    cpl = utils.powerlaw(log10_A=log10_Agw, gamma=gamma_gw)
-    crn = gp_signals.FourierBasisGP(cpl, components=chain_params.gwb_comps, Tspan=Tspan, name='gw')
+        gamma_gw = parameter.Uniform(gwb_gamma_prior[0],gwb_gamma_prior[1])('gwb_gamma')
+        cpl = utils.powerlaw(log10_A=log10_Agw, gamma=gamma_gw)
+        crn = gp_signals.FourierBasisGP(cpl, components=chain_params.gwb_comps, Tspan=Tspan, name='gw')
+    elif gwb_noise_model == 'free_spectral':
+        if gwb_log10_rho_prior is None:
+            gwb_log10_rho_prior = np.array([-9, -4])
+        log10_rho_gw = parameter.Uniform(gwb_log10_rho_prior[0], gwb_log10_rho_prior[1], size=chain_params.gwb_comps)('gwb_log10_rho')
+        cfs = free_spectrum(log10_rho=log10_rho_gw)
+        crn = gp_signals.FourierBasisGP(cfs, components=chain_params.gwb_comps, Tspan=Tspan, name='gw')
+    else:
+        raise NotImplementedError("gwb_noise_model must be either 'powerlaw' or 'free_spectral'")
 
     tm = gp_signals.TimingModel()
 

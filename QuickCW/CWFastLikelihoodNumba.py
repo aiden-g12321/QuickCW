@@ -260,12 +260,13 @@ def create_Sigma(phiinv_loc,TNT,Sigma):
     return Sigma
 
 @jitclass([('Npsr',nb.int64),\
-           ('cw_p_dists',nb.float64[:]),('cw_p_phases',nb.float64[:]),('rn_gammas',nb.float64[:]),('rn_log10_As',nb.float64[:]),\
+           ('cw_p_dists',nb.float64[:]),('cw_p_phases',nb.float64[:]),('rn_vals',nb.float64[:]),('gwb_vals',nb.float64[:]),\
            ('cos_gwtheta',nb.float64),('cos_inc',nb.float64),('gwphi',nb.float64),('log10_fgw',nb.float64),('log10_h',nb.float64),\
-           ('log10_mc',nb.float64),('phase0',nb.float64),('psi',nb.float64),('gwb_gamma',nb.float64),('gwb_log10_A',nb.float64),\
+           ('log10_mc',nb.float64),('phase0',nb.float64),('psi',nb.float64),\
            ('idx_dists',nb.int64[:]),('idx_phases',nb.int64[:]),('idx_rn_gammas',nb.int64[:]),('idx_rn_log10_As',nb.int64[:]),\
            ('idx_cos_gwtheta',nb.int64),('idx_cos_inc',nb.int64),('idx_gwphi',nb.int64),('idx_log10_fgw',nb.int64),('idx_log10_h',nb.int64),\
-           ('idx_log10_mc',nb.int64),('idx_phase0',nb.int64),('idx_psi',nb.int64),('idx_gwb_gamma',nb.int64),('idx_gwb_log10_A',nb.int64),\
+           ('idx_log10_mc',nb.int64),('idx_phase0',nb.int64),('idx_psi',nb.int64),\
+           ('rn_pl_mode',nb.boolean),('gwb_pl_mode',nb.boolean),('n_rn_per_psr',nb.int64),('idx_rn_psr',nb.int64[:,::1]),\
            ('idx_rn',nb.int64[:]),('idx_gwb',nb.int64[:]),('idx_int',nb.int64[:]),('idx_cw_ext',nb.int64[:]),('idx_cw_int',nb.int64[:])])
 class CWInfo:
     """simple jitclass to store the various parmeters in a way that can be accessed quickly from a numba environment
@@ -276,19 +277,39 @@ class CWInfo:
     :param par_names_cw_ext:    Subset of all parameters that describe the CW signal and are projection parameters (previously called extrinsic parameters)
     :param par_names_cw_int:    Subset of all parameters that describe the CW signal and are shape parameters (previously called intrinsic parameters)
     """
-    
+
     def __init__(self,Npsr,params_in,par_names,par_names_cw_ext,par_names_cw_int):
         self.Npsr = Npsr
         self.idx_phases = np.array([par_names.index(par) for par in par_names if "_cw0_p_phase" in par])
         self.idx_dists = np.array([par_names.index(par) for par in par_names if "_cw0_p_dist" in par])
 
+        #per pulsar red noise parameters: either powerlaw (gamma, log10_A) or free spectral (log10_rho in each frequency bin)
         self.idx_rn_gammas = np.array([par_names.index(par) for par in par_names if "_red_noise_gamma" in par])
         self.idx_rn_log10_As = np.array([par_names.index(par) for par in par_names if "_red_noise_log10_A" in par])
-        self.idx_rn = np.concatenate((self.idx_rn_gammas,self.idx_rn_log10_As))
+        idx_rn_rhos = np.array([par_names.index(par) for par in par_names if "_red_noise_log10_rho" in par])
 
-        self.idx_gwb_gamma = par_names.index("gwb_gamma")
-        self.idx_gwb_log10_A = par_names.index("gwb_log10_A")
-        self.idx_gwb = np.array([self.idx_gwb_gamma, self.idx_gwb_log10_A])
+        self.rn_pl_mode = self.idx_rn_gammas.size > 0
+        if self.rn_pl_mode:
+            #keep ordering [all gammas, all log10_As] for backwards compatibility with eigenvector jumps
+            self.idx_rn = np.concatenate((self.idx_rn_gammas,self.idx_rn_log10_As))
+            self.n_rn_per_psr = 2
+            self.idx_rn_psr = np.zeros((Npsr,2),dtype=np.int64)
+            self.idx_rn_psr[:,0] = self.idx_rn_gammas
+            self.idx_rn_psr[:,1] = self.idx_rn_log10_As
+        else:
+            #free spectral mode: log10_rho parameters are stored pulsar-major in par_names
+            self.idx_rn = idx_rn_rhos
+            self.n_rn_per_psr = idx_rn_rhos.size//Npsr
+            self.idx_rn_psr = idx_rn_rhos.copy().reshape((Npsr,self.n_rn_per_psr))
+
+        #gwb parameters: either powerlaw (gwb_gamma, gwb_log10_A) or free spectral (gwb_log10_rho in each frequency bin)
+        idx_gwb_pl = np.array([par_names.index(par) for par in par_names if par=="gwb_gamma" or par=="gwb_log10_A"])
+        idx_gwb_rhos = np.array([par_names.index(par) for par in par_names if "gwb_log10_rho" in par])
+        self.gwb_pl_mode = idx_gwb_pl.size > 0
+        if self.gwb_pl_mode:
+            self.idx_gwb = idx_gwb_pl
+        else:
+            self.idx_gwb = idx_gwb_rhos
 
         self.idx_cos_inc = par_names.index("0_cos_inc")
         self.idx_log10_h = par_names.index("0_log10_h")
@@ -324,10 +345,8 @@ class CWInfo:
         self.gwphi = params_in[self.idx_gwphi]
         self.log10_fgw = params_in[self.idx_log10_fgw]
         self.log10_mc = params_in[self.idx_log10_mc]
-        self.rn_gammas = params_in[self.idx_rn_gammas]
-        self.rn_log10_As = params_in[self.idx_rn_log10_As]
-        self.gwb_gamma = params_in[self.idx_gwb_gamma]
-        self.gwb_log10_A = params_in[self.idx_gwb_log10_A]
+        self.rn_vals = params_in[self.idx_rn]
+        self.gwb_vals = params_in[self.idx_gwb]
 
     def validate_consistent(self,params_in):
         """check current params match input params"""
@@ -341,10 +360,8 @@ class CWInfo:
         assert isclose(self.gwphi, params_in[self.idx_gwphi])
         assert isclose(self.log10_fgw, params_in[self.idx_log10_fgw])
         assert isclose(self.log10_mc, params_in[self.idx_log10_mc])
-        assert np.all(isclose(self.rn_gammas, params_in[self.idx_rn_gammas]))
-        assert np.all(isclose(self.rn_log10_As, params_in[self.idx_rn_log10_As]))
-        assert isclose(self.gwb_gamma, params_in[self.idx_gwb_gamma])
-        assert isclose(self.gwb_log10_A, params_in[self.idx_gwb_log10_A])
+        assert np.all(isclose(self.rn_vals, params_in[self.idx_rn]))
+        assert np.all(isclose(self.gwb_vals, params_in[self.idx_gwb]))
         return True
 
 @njit()
@@ -887,7 +904,7 @@ def update_intrinsic_params(x0,isqrNvecs,Nrs,pos,pdist,toas,NN,MMs,SigmaTNrProds
            ('TNvs',nb.types.ListType(nb.types.float64[::1,:])),('chol_Sigmas',nb.types.ListType(nb.types.float64[::1,:])),\
            ('MMs',nb.float64[:,:,::1]),('NN',nb.float64[:,::1]),\
            ('cos_gwtheta',nb.float64),('gwphi',nb.float64),('log10_fgw',nb.float64),('log10_mc',nb.float64),('cw_p_dists',nb.float64[:]),\
-           ('gwb_gamma',nb.float64),('gwb_log10_A',nb.float64),('rn_gammas',nb.float64[:]),('rn_log10_As',nb.float64[:]),
+           ('gwb_vals',nb.float64[:]),('rn_vals',nb.float64[:]),
            ('includeCW',nb.boolean),('prior_recovery',nb.boolean)])
 class FastLikeInfo:
     """simple jitclass to store the various elements of fast likelihood calculation in a way that can be accessed quickly from a numba environment
@@ -971,10 +988,8 @@ class FastLikeInfo:
         assert self.gwphi==x0.gwphi
         assert self.log10_fgw==x0.log10_fgw
         assert self.log10_mc==x0.log10_mc
-        assert self.gwb_gamma==x0.gwb_gamma
-        assert self.gwb_log10_A==x0.gwb_log10_A
-        assert np.all(self.rn_gammas==x0.rn_gammas)
-        assert np.all(self.rn_log10_As==x0.rn_log10_As)
+        assert np.all(self.gwb_vals==x0.gwb_vals)
+        assert np.all(self.rn_vals==x0.rn_vals)
         assert np.all(self.cw_p_dists[:psr_idx]==x0.cw_p_dists[:psr_idx])
         assert np.all(self.cw_p_dists[psr_idx:]==x0.cw_p_dists[psr_idx:])
         resres_old = self.resres_array.copy()
@@ -1000,10 +1015,8 @@ class FastLikeInfo:
             assert self.gwphi==x0.gwphi
             assert self.log10_fgw==x0.log10_fgw
             assert self.log10_mc==x0.log10_mc
-            assert self.gwb_gamma==x0.gwb_gamma
-            assert self.gwb_log10_A==x0.gwb_log10_A
-            assert np.all(self.rn_gammas==x0.rn_gammas)
-            assert np.all(self.rn_log10_As==x0.rn_log10_As)
+            assert np.all(self.gwb_vals==x0.gwb_vals)
+            assert np.all(self.rn_vals==x0.rn_vals)
         #leave dist_only in even though it is not currently respected in case it turns out to be faster later
         #resres_temp = self.resres_array.copy()
         resres_old = self.resres_array.copy()
@@ -1048,10 +1061,8 @@ class FastLikeInfo:
 
             self.set_resres_logdet(resres_temp,self.logdet_array,self.logdet_base)
         #track the intrinsic parameters this was set at so we can throw in error if they are inconsistent with an input x0
-        self.gwb_gamma = x0.gwb_gamma
-        self.gwb_log10_A = x0.gwb_log10_A
-        self.rn_gammas = x0.rn_gammas.copy()
-        self.rn_log10_As = x0.rn_log10_As.copy()
+        self.gwb_vals = x0.gwb_vals.copy()
+        self.rn_vals = x0.rn_vals.copy()
         self.cos_gwtheta = x0.cos_gwtheta
         self.gwphi = x0.gwphi
         self.log10_fgw = x0.log10_fgw
@@ -1067,10 +1078,8 @@ class FastLikeInfo:
 
             self.set_resres_logdet(resres_temp,self.logdet_array,self.logdet_base)
         #track the intrinsic parameters this was set at so we can throw in error if they are inconsistent with an input x0
-        self.gwb_gamma = x0.gwb_gamma
-        self.gwb_log10_A = x0.gwb_log10_A
-        self.rn_gammas = x0.rn_gammas.copy()
-        self.rn_log10_As = x0.rn_log10_As.copy()
+        self.gwb_vals = x0.gwb_vals.copy()
+        self.rn_vals = x0.rn_vals.copy()
         self.cos_gwtheta = x0.cos_gwtheta
         self.gwphi = x0.gwphi
         self.log10_fgw = x0.log10_fgw
@@ -1095,10 +1104,8 @@ class FastLikeInfo:
         assert self.gwphi==x0.gwphi
         assert self.log10_fgw==x0.log10_fgw
         assert self.log10_mc==x0.log10_mc
-        assert self.gwb_gamma==x0.gwb_gamma
-        assert self.gwb_log10_A==x0.gwb_log10_A
-        assert np.all(self.rn_gammas==x0.rn_gammas)
-        assert np.all(self.rn_log10_As==x0.rn_log10_As)
+        assert np.all(self.gwb_vals==x0.gwb_vals)
+        assert np.all(self.rn_vals==x0.rn_vals)
         assert np.all(self.cw_p_dists==x0.cw_p_dists)
         assert self.logdet_base_orig==self.logdet_base
         assert self.logdet==self.logdet_base+self.logdet_array.sum()

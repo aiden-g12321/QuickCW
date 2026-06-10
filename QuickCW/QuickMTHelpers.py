@@ -79,18 +79,18 @@ def do_intrinsic_update_mt(mcc, itrb):
         elif which_jump==1:  # update per psr RN
             recompute_rn = True
             all_eigs = True
-            n_jump_loc = 2*Npsr
+            n_jump_loc = mcc.x0s[j].idx_rn.size
             idx_choose_psr = list(range(Npsr))
             idx_choose_psr_dist = idx_choose_psr
-            idx_choose = np.concatenate((mcc.x0s[j].idx_rn_gammas,mcc.x0s[j].idx_rn_log10_As))
+            idx_choose = mcc.x0s[j].idx_rn
             scaling = 2.38*np.sqrt(Ts[j])/np.sqrt(n_jump_loc)
             #scaling = 1/np.sqrt(n_jump_loc)
         elif which_jump==2:  # update common RN
             recompute_gwb = True
-            n_jump_loc = 2
-            idx_choose = np.array([mcc.x0s[j].idx_gwb_gamma, mcc.x0s[j].idx_gwb_log10_A])
+            n_jump_loc = mcc.x0s[j].idx_gwb.size
+            idx_choose = mcc.x0s[j].idx_gwb
             idx_choose_psr_dist = list(range(Npsr)) #all pulsars need to be updated in everything here
-            scaling = 2.38*np.sqrt(Ts[j])/np.sqrt(n_jump_loc/2)
+            scaling = 2.38*np.sqrt(Ts[j])/np.sqrt(max(1.,n_jump_loc/2))
             #scaling = 1/np.sqrt(n_jump_loc)
         elif which_jump==3:  # update common intrinsic parameters (chirp mass, frequency, sky location[2])
             recompute_int = True
@@ -118,10 +118,10 @@ def do_intrinsic_update_mt(mcc, itrb):
             n_dist_loc = min(Npsr,mcc.chain_params.n_dist_main)#max(1,np.int64(cm.n_dist_main*mcc.chain_params.Ts[j])))
             idx_choose_psr_dist = np.random.choice(Npsr,n_dist_loc,replace=False)
             idx_choose_psr = list(range(Npsr))
-            n_jump_loc = 2*Npsr+4+2 #distance+RN+common_pars+crn
+            n_jump_loc = mcc.x0s[j].idx_rn.size+4+mcc.x0s[j].idx_gwb.size #RN+common_pars+crn
             idx_choose = np.concatenate((mcc.x0s[j].idx_cw_int[:4],
-                                         mcc.x0s[j].idx_rn_gammas, mcc.x0s[j].idx_rn_log10_As,
-                                         [mcc.x0s[j].idx_gwb_gamma, mcc.x0s[j].idx_gwb_log10_A]))
+                                         mcc.x0s[j].idx_rn,
+                                         mcc.x0s[j].idx_gwb))
             scaling = 2.38*np.sqrt(Ts[j])/np.sqrt(n_jump_loc)
         else:
             raise ValueError('jump index unrecognized',which_jump)
@@ -171,8 +171,8 @@ def do_intrinsic_update_mt(mcc, itrb):
                                                  fisher_prob/total_type_weight])
         if which_jump_type==1 and which_jump==4:
             #force 'all' differential evolution jumps to be in both gwb and common parameters only
-            idx_choose = np.concatenate((mcc.x0s[j].idx_cw_int[:4],[mcc.x0s[j].idx_gwb_gamma, mcc.x0s[j].idx_gwb_log10_A]))
-            n_jump_loc = 6
+            idx_choose = np.concatenate((mcc.x0s[j].idx_cw_int[:4],mcc.x0s[j].idx_gwb))
+            n_jump_loc = idx_choose.size
             scaling = 2.38*np.sqrt(Ts[j])/np.sqrt(n_jump_loc)
             idx_choose_psr = []
             idx_choose_psr_dist = []
@@ -252,13 +252,18 @@ def do_intrinsic_update_mt(mcc, itrb):
             #backwards/forwards proposal ratio is always one for Gaussian jumps
             log_proposal_ratio = 0.0
 
-            if recompute_rn:  # use RN eigenvectors
-                scale_eig0 = scaling*mcc.eig_rn[j,:,0,:]
-                scale_eig1 = scaling*mcc.eig_rn[j,:,1,:]
-                new_point = add_rn_eig_jump(scale_eig0,scale_eig1,new_point,new_point[mcc.x0s[j].idx_rn],mcc.x0s[j].idx_rn,Npsr,all_eigs=all_eigs)
+            if recompute_rn:
+                if mcc.x0s[j].rn_pl_mode:  # use RN eigenvectors
+                    scale_eig0 = scaling*mcc.eig_rn[j,:,0,:]
+                    scale_eig1 = scaling*mcc.eig_rn[j,:,1,:]
+                    new_point = add_rn_eig_jump(scale_eig0,scale_eig1,new_point,new_point[mcc.x0s[j].idx_rn],mcc.x0s[j].idx_rn,Npsr,all_eigs=all_eigs)
+                else:  # free spectral mode: use diagonal fishers
+                    idx_loc = mcc.x0s[j].idx_rn
+                    fisher_diag_loc = scaling * mcc.fisher_diag[j][idx_loc]
+                    jump[idx_loc] += fisher_diag_loc*np.random.normal(0.,1.,idx_loc.size)
 
             if recompute_gwb: # use diagonal fishers
-                idx_loc = np.array([mcc.x0s[j].idx_gwb_gamma, mcc.x0s[j].idx_gwb_log10_A])
+                idx_loc = mcc.x0s[j].idx_gwb
                 fisher_diag_loc = scaling * mcc.fisher_diag[j][idx_loc]
                 jump[idx_loc] += fisher_diag_loc*np.random.normal(0.,1.,idx_loc.size)
 
@@ -314,7 +319,7 @@ def do_intrinsic_update_mt(mcc, itrb):
 
             mcc.x0s[j].update_params(new_point)
             try:
-                mcc.flm.recompute_FastLike(mcc.FLI_swap,mcc.x0s[j],dict(zip(mcc.par_names, new_point)), mask=mask)
+                mcc.flm.recompute_FastLike(mcc.FLI_swap,mcc.x0s[j],mcc.pta.map_params(new_point), mask=mask)
             except np.linalg.LinAlgError:
                 print("failed to update parameters to requested point, rejecting proposal")
                 print("jump selections: ",which_jump,which_jump_type)
@@ -492,8 +497,8 @@ def do_intrinsic_update_mt(mcc, itrb):
                 #no distance updates for parameters that were masked
                 assert np.all(mcc.samples[j,itrb,mcc.x0_swap.idx_dists[mask]]==mcc.samples[j,itrb+1,mcc.x0_swap.idx_dists[mask]])
                 #no red noise updates for parameters that were masked
-                assert np.all(mcc.samples[j,itrb,mcc.x0_swap.idx_rn_log10_As[mask]]==mcc.samples[j,itrb+1,mcc.x0_swap.idx_rn_log10_As[mask]])
-                assert np.all(mcc.samples[j,itrb,mcc.x0_swap.idx_rn_gammas[mask]]==mcc.samples[j,itrb+1,mcc.x0_swap.idx_rn_gammas[mask]])
+                idx_rn_masked = mcc.x0_swap.idx_rn_psr[mask].flatten()
+                assert np.all(mcc.samples[j,itrb,idx_rn_masked]==mcc.samples[j,itrb+1,idx_rn_masked])
             #no red noise updates for parameters that were not masked
 
         #print(j,Ts[j],which_jump,which_jump_type,recompute_dist,recompute_gwb,recompute_int,recompute_rn,log_acc_decide,log_acc_ratio,log_acc_decide<log_acc_ratio,log_L_choose,chosen_trial)

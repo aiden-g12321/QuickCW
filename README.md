@@ -3,6 +3,8 @@ Fast continuous wave (CW) analysis for pulsar timing array data
 
 See [arXiv:2204.07160](https://arxiv.org/abs/2204.07160) for details on the method, and the [Quick-start Guide](https://github.com/nanograv/QuickCW/blob/main/docs/how_to_run_QuickCW.md) for details on how to run the code yourself!
 
+**This fork** adds the option to model the per-pulsar red noise and/or the GWB with a free spectral model (the PSD in every frequency bin is a free `log10_rho` parameter) instead of a power law, selected via `QuickCW(..., psr_noise_model='powerlaw'|'free_spectral', gwb_noise_model='powerlaw'|'free_spectral')`. See [demo_free_spectral.ipynb](demo_free_spectral.ipynb) for a demonstration, and `tests/` for short test samplers covering all model combinations on a tiny simulated dataset.
+
 Citation:
 ```
 @ARTICLE{2022PhRvD.105l2003B,
