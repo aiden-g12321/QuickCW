@@ -1,0 +1,10 @@
+PSR      J0600+3000
+RAJ      06:00:00   1
+DECJ     30:00:00  1
+F0       400.0    1
+F1       -1e-15  1
+PEPOCH   54750
+POSEPOCH 54750
+DM       10.0
+EPHEM    DE421
+UNITS    TDB
